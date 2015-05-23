@@ -1,0 +1,153 @@
+---
+title: "PML_Assignment"
+author: "Matteo Zucchetta"
+date: "Saturday, May 23, 2015"
+output: html_document
+---
+
+In this document data of Human Activity Recognition 
+have been analysed with the aim of building a machine learning to predict
+the 
+
+After a little preprocessing of the dataset, in order to fix some of the problems
+in the data, the most relevant information will be used as predictors for a ML algorithm, after data transformation (pca-based, performed on train data).
+
+
+
+# Data Processing.
+The dataset is loaded into R using the *read.csv* function.
+
+
+```{r, cache = TRUE}
+library(caret)
+
+data_train <- read.csv("pml-training.csv")
+
+data_test<- read.csv("pml-testing.csv")
+
+
+```
+
+The characteristics of the dataset are analyses with the *summary* function (not
+shown, see code). 
+
+```{r, echo = T, results = 'hide'}
+summary(data_train)
+```
+
+Many variables have too many NAs to be included. First of all data are splitted
+in a training and a testing set, using about 30% of the data for evaluation
+purpose. Data containing too many NAs (not suitable for a impute pre-processing)
+or with a near zero variance, are excluded from the analysis. Also factor colums
+with a large number of empty observation are removed.
+
+```{r, echo = T, results = 'as.is', cache = TRUE}
+set.seed(3452)
+
+inTrain <- createDataPartition(data_train$classe, p = 1/10, list = FALSE)
+tr_df <-  data_train[inTrain, ]
+test_df <-  data_train[-inTrain, ] 
+
+whichNA <- ifelse(unlist(lapply(1:ncol(tr_df),function(x) length(which(is.na(tr_df[, x]))))) / nrow(tr_df) > 0.1, 0, 1)
+
+tr_df <- tr_df[, which(whichNA == 1)]
+test_df <- test_df[, which(whichNA == 1)]
+
+whichEMPTY <- ifelse(unlist(lapply(1:ncol(tr_df),function(x) length(which(tr_df[, x] == "")))) / nrow(tr_df) > 0.1, 0, 1)
+
+tr_df <- tr_df[, which(whichEMPTY == 1)]
+test_df <- test_df[, which(whichEMPTY == 1)]
+
+nzv <- nearZeroVar(tr_df[, c(8:59)], saveMetrics = T)
+which(nzv$zeroVar) # non problem!
+```
+
+
+Data is checked for correlations:
+
+```{r, echo = T, results = 'as.is', warning = F, message = F}
+
+library(Hmisc)
+clus<-varclus(as.matrix(tr_df[, -c(1:7, 60)]), similarity=c("pearson"), type=c("data.matrix"))
+plot(clus,ylim=c(0,0.8));abline(h=1-0.7^2,col="red")#;abline(h=1-0.95^2,col="red",lty=3)
+```
+
+
+
+Many retained variables are highly correlated, so the are pre-processed with a
+PCA, keeping the number of PCs needed to explain 95% of the variance.
+
+```{r, echo = T, results = 'as.is', warning = F, message = T, cache = T}
+
+preProc<- preProcess(tr_df[, -c(1:7, 60)], method = "pca", thresh = 0.95)
+preProcVal <- predict(preProc, tr_df[, -c(1:7, 60)])
+print(paste('n° PCs =', ncol(preProcVal)))
+```
+
+
+# Model Fitting
+
+A Random Forest is trained, along with a single tree model, just for comparison.
+The two algorithm are fitted after the exploration of the optimal values of the 
+training parameters (*mtry* and *cp*), by means of a 5-fold Cross Validation
+performed on the training set, to obtain an estimation of the accuracy of the
+classification.
+
+```{r, echo = T, results = 'as.is', warning = F, message = T, cache = T}
+
+trl <- trainControl(classProbs=TRUE, repeats = 5, method = "cv", number = 5)
+
+grid_rf <- expand.grid(.mtry = c(3:12)) # model selection parameter in this case mtry.
+grid_rpart<- expand.grid(.cp = c(0.01, 0.05,  0.1, 0.2, 0.5, 0.8, 0.99)) # model selection parameter in this case cp
+
+ntr <- 2000 # number of trees of the RF
+
+# Both trainControl and expand.grid is provided by caret
+set.seed(89)
+mod_rf <- train(x = preProcVal, y = tr_df[, 60], method = "rf", tuneGrid=grid_rf, metric = c("Kappa"), trControl = trl, ntree = ntr)
+
+mod_rf
+varImpPlot(mod_rf$finalModel)
+
+mod_rpart <- train(x = preProcVal, y = tr_df[, 60], method = "rpart", tuneGrid=grid_rpart, metric = c("Kappa"), trControl = trl)
+mod_rpart
+
+
+plot(mod_rpart$finalModel)
+text(mod_rpart$finalModel)
+
+results <- resamples(list(mod_rf, mod_rpart))
+
+dotplot(results)
+
+```
+
+# Accuracy
+
+The estimated accuracy (by mean of CV) is **`r round(mod_rpart$results$Accuracy[which.max(mod_rpart$results$Kappa)],2)`** for the single tree (rpart) and **`r round(mod_rf$results$Accuracy[which.max(mod_rf$results$Kappa)],2)`** for the Random Forest model. This 
+is the expected out of bag accuracy. The data not used for training the model
+can be used to obtain a more robust accuracy estimation.
+
+
+
+```{r, echo = T, results = 'as.is', warning = F, message = T, cache = T}
+
+test_set <- predict(preProc, newdata = test_df[, -c(1:7, 60)])
+cm <- confusionMatrix(predict(mod_rf, newdata = test_set), test_df$classe)
+print(cm)
+```
+
+The accuracy of classification, according to the testing set of data is: **`r round(cm$overall[1], 2)`**.
+Finally, the prediction of the Random Forest model for the 20 observation left
+out for the evaluation, are given in the next chunk.
+
+```{r, echo = T, results = 'as.is', warning = F, message = T, cache = T}
+
+out_test <- data_test[, which(whichNA == 1)]
+out_test <- out_test[, which(whichEMPTY == 1)]
+
+out_proc <- predict(preProc, newdata = out_test[, -c(1:7, 60)])
+
+table(out_test$problem_id,predict(mod_rf, newdata = out_proc))
+
+```
